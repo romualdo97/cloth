@@ -1,0 +1,407 @@
+<!--
+  Problemas y limitaciones de la simulación:
+    - El sistema se inestabiliza cuando se define una restriccion fija
+-->
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Cloth simulation using euler integrator</title>
+    <meta charset="utf-8">
+    <meta name="fork" content="Roberto Hincapie">
+    <meta name="author" content="Romualdo J. Villalobos P.">
+    <meta name="author" content="Jose R. Villalobos P.">
+  </head>
+
+  <body>
+    <div id="container"></div>
+  </body>
+
+  <script src="js/three.min.js"></script>
+  <script src="js/OrbitControls.js"></script>
+  <script src="js/noCaching.js"></script>
+  <script src="js/Clases.js"></script>
+
+  <script type="x-shader/x-fragment" id="fragmentShaderDepth">
+
+    #include <packing>
+
+    uniform sampler2D texture;
+    varying vec2 vUV;
+
+    void main() {
+
+      vec4 pixel = texture2D( texture, vUV );
+
+      if ( pixel.a < 0.5 ) discard;
+
+      gl_FragData[ 0 ] = packDepthToRGBA( gl_FragCoord.z );
+
+    }
+  </script>
+
+  <script type="x-shader/x-vertex" id="vertexShaderDepth">
+
+    varying vec2 vUV;
+
+    void main() {
+
+      vUV = 0.75 * uv;
+
+      vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+
+      gl_Position = projectionMatrix * mvPosition;
+
+    }
+
+  </script>
+
+  <script type="text/javascript" id="mainCode">
+    var container, renderer, scene, camera, mesh,
+    start = Date.now(),
+    fov = 30; // field of view
+
+    // VARIABLES GLOBALES
+    var sist = new Sistema(0.02);
+
+    var kf = 0.5, 
+        N = 10, // numero de filas
+        M = 5, // numero de columnas
+        a = 2 , // mitad ancho arriba capa
+        b = 10 , // mitad ancho abajo capa
+        L = 36 , // Largo de la capa
+        kr = 100; // constante de resorte
+
+    var m = [];
+    var m_dbg = [];
+
+    var capaGeometry = null,
+        capaMesh = null;
+
+    var m2, // masa para la esfera
+        r = 3; // radio esfera
+
+    window.addEventListener( 'load', function() 
+    {
+
+      // grab the container from the DOM
+      container = document.getElementById( "container" );
+
+      // create a scene
+      scene = new THREE.Scene();
+      scene.fog = new THREE.Fog( 0xcce0ff, 500, 10000 );
+
+
+      // create a camera the size of the browser window
+      // and place it 100 units away, looking towards the center of the scene
+      camera = new THREE.PerspectiveCamera(
+        fov, // fov — Camera frustum vertical field of view.
+        window.innerWidth / window.innerHeight, // aspect — Camera frustum aspect ratio.
+        1, // near — Camera frustum near plane.
+        10000 // far — Camera frustum far plane.
+      );
+      camera.position.z = 100;
+
+      var axes = new THREE.AxisHelper(100);
+      scene.add( axes );
+ 
+      // create a wireframe material
+      material = new THREE.MeshBasicMaterial( {
+        color: 0xb7ff00,
+        wireframe: true
+      } );
+
+      // lights
+
+      var light;
+
+      scene.add( new THREE.AmbientLight( 0x666666 ) );
+
+      light = new THREE.DirectionalLight( 0xdfebff, 1.75 );
+      light.position.set( 50, 200, 100 );
+      light.position.multiplyScalar( 1.3 );
+
+      light.castShadow = true;
+
+      light.shadow.mapSize.width = 1024;
+      light.shadow.mapSize.height = 1024;
+
+      var d = 300;
+
+      light.shadow.camera.left = - d;
+      light.shadow.camera.right = d;
+      light.shadow.camera.top = d;
+      light.shadow.camera.bottom = - d;
+
+      light.shadow.camera.far = 1000;
+
+      scene.add( light );
+
+      // cloth material
+      var loader = new THREE.TextureLoader();
+      var clothTexture = loader.load( 'textures/patterns/circuit_pattern.png' );
+      clothTexture.wrapS = clothTexture.wrapT = THREE.RepeatWrapping;
+      clothTexture.anisotropy = 16;
+
+      var clothMaterial = new THREE.MeshPhongMaterial( {
+        specular: 0x030303,
+        map: clothTexture,
+        side: THREE.DoubleSide,
+        alphaTest: 0.5
+      } );
+
+    var uniforms = { texture:  { value: clothTexture } };
+    var vertexShader = document.getElementById( 'vertexShaderDepth' ).textContent;
+    var fragmentShader = document.getElementById( 'fragmentShaderDepth' ).textContent;
+
+    // ground
+
+    var groundTexture = loader.load( 'textures/terrain/grasslight-big.jpg' );
+    groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+    groundTexture.repeat.set( 25, 25 );
+    groundTexture.anisotropy = 16;
+
+    var groundMaterial = new THREE.MeshPhongMaterial( { color: 0xffffff, specular: 0x111111, map: groundTexture } );
+
+    var mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 20000, 20000 ), groundMaterial );
+    mesh.position.y = - 100;
+    mesh.rotation.x = - Math.PI / 2;
+    mesh.receiveShadow = true;
+    scene.add( mesh );
+
+/*
+      // create a custom shader material
+      material = new THREE.ShaderMaterial( {
+        vertexShader: document.getElementById( 'vertexShader' ).textContent,
+        fragmentShader: document.getElementById( 'fragmentShader' ).textContent
+      } );*/
+
+      capaGeometry = new THREE.PlaneGeometry( 20, 20, M, N );
+
+      // create a plane and assign the material
+      capaMesh = new THREE.Mesh(
+        capaGeometry, 
+        clothMaterial
+      );
+
+      configureScene();
+      configurarCapa(capaMesh, capaGeometry);
+      configurarRestricciones(capaGeometry);
+
+      //capaMesh.rotation.x = Math.PI / 2;
+      //capaMesh.rotation.z = Math.PI / 2;
+
+      scene.add( capaMesh );
+
+      // create the renderer and attach it to the DOM
+      renderer = new THREE.WebGLRenderer();
+      renderer.setSize( window.innerWidth, window.innerHeight );
+      renderer.setPixelRatio( window.devicePixelRatio );
+      renderer.setClearColor( scene.fog.color );
+
+      container.appendChild( renderer.domElement );
+
+      // Add OrbitControls so that we can pan around with the mouse.
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+      //console.log(sist.masas);
+      //console.log(sist.masas[65].r);
+      //console.log("no err");
+
+      render();
+
+    } );
+
+    function updateCapaVertex(mesh, geometry)
+    {
+      mesh.geometry.verticesNeedUpdate = true;
+      for ( var i = 0, l = geometry.vertices.length; i < l; i ++ )
+      {
+        geometry.vertices[ i ].x = m[i].r.x;
+        geometry.vertices[ i ].y = m[i].r.y;
+        geometry.vertices[ i ].z = m[i].r.z;
+      }
+    }
+
+    function render() 
+    {
+
+      console.warn("----INICIA RENDER");
+      sist.correr();
+      updateCapaVertex(capaMesh, capaGeometry);
+      // console.log(m[0].r);
+
+      // let there be light
+      controls.update();
+      renderer.render( scene, camera );
+      requestAnimationFrame( render );
+
+
+    }
+
+    function configurarCapa(mesh, geometry)
+    {
+      m_dbg.push(new Masa({
+        pos: new THREE.Vector3(0, 0, 0),
+        vel: new THREE.Vector3(0),
+        m: 1, kv: 5, tipo: Masa.movil, add: 1
+      }));
+      m_dbg.push(new Masa({
+        pos: new THREE.Vector3(10, 0, 0),
+        vel: new THREE.Vector3(0),
+        m: 1, kv: 5, tipo: Masa.movil, add: 1
+      }));
+
+      for ( var i = 0, l = geometry.vertices.length; i < l; i ++ )
+      {
+          var vrtxPos = getVertexIndex(i, M + 1);
+          //console.log(vrtxPos);
+          var x = 2 * ((b - a) / N * vrtxPos.y + a) * vrtxPos.x / M - (b - a) / N * vrtxPos.y - a;
+          var y = - L * vrtxPos.y / N; // en python esta era la posicion para la altura
+
+          m.push(new Masa({
+            pos: new THREE.Vector3(x, 16, y),
+            vel: new THREE.Vector3(0),
+            m: 1, kv: 5, tipo: Masa.movil, add: 1
+          }));
+          
+          //geometry.vertices[ i ].x = x;
+          //geometry.vertices[ i ].y = 16;
+          //geometry.vertices[ i ].z = y;
+          geometry.vertices[ i ].x = m[i].r.x;
+          geometry.vertices[ i ].y = m[i].r.y;
+          geometry.vertices[ i ].z = m[i].r.z;
+          
+          // si el vertice actual esta en la primera fila de la matriz...
+          if ( i <= M)
+          {
+            // curvar primera fila
+            // geometry.vertices[ i ].z += -Math.sin((Math.PI / M) * i)*2;
+            /*m[i].r.z += -Math.sin((Math.PI / M) * i)*2;
+            geometry.vertices[ i ].z = m[i].r.z;*/
+
+            // haciendo fijas las masas de la primera fila
+            m[i].tipo = Masa.fija;
+          }
+
+          console.log(m);
+      }
+      //geometry.vertices[ 0 ].y += 10;
+      //geometry.vertices[ 6 ].y += 8;
+
+      mesh.geometry.verticesNeedUpdate = true;
+      
+      console.warn("Instancias de masas listas");
+    }
+
+    function getVertexIndex(index, columns)
+    {
+      // i % M_columnas: la posicion x en el grid
+      // Math.floor(i/M_columnas): la posicion y en el grid
+      return new THREE.Vector2(index % columns, Math.floor(index/columns));
+    }
+
+    function drawLine(a, b)
+    {
+      // Geometría
+      var Geometria = new THREE.Geometry();
+      // vector a dibujar
+      var vertices=[[a.x, a.y, a.z], [b.x, b.y, b.z]];
+      var long_vertices=vertices.length;
+      for(i=0;i<long_vertices;i++){
+          var x=vertices[i][0];
+          var y=vertices[i][1];
+          var z=vertices[i][2];
+          //Agregamos vértices al vector
+          var Vector = new THREE.Vector3(x,y,z);
+          //Agregamos el vector a la geometría
+          Geometria.vertices.push(Vector);   
+          }
+      // agregamos un material para que el punto tenga color
+      Material = new THREE.ParticleBasicMaterial({color:0XFF0000});
+      // creamos una partícula con la geometría y el material
+      Figura = new THREE.Line(Geometria,Material);
+      // agregamos la partícula al escenario
+      scene.add(Figura);
+    }
+
+    function configureScene()
+    {
+      m2 = new Masa({
+            pos: new THREE.Vector3(0, 0, 0),
+            vel: new THREE.Vector3(0),
+            m: 1, kv: kf, tipo: Masa.fija, add: 1
+          });
+    }
+
+    function configurarRestricciones(geometry)
+    {
+
+      var dist = new THREE.Vector3(0);
+      
+      dist.addVectors(m_dbg[0].r, m_dbg[1].r.clone().multiplyScalar(-1)); // r2 - r1
+      
+      sist.conectar(m_dbg[0], m_dbg[1], kr, dist.length(), 5);
+
+      //drawLine(m[6].r, new THREE.Vector3(0, 16, 16)); // debug purposes
+
+      
+      for ( var i = 0, l = geometry.vertices.length; i < l; i ++ )
+      {
+        var p = getVertexIndex(i, M + 1); // posision discreta del vertice en la matriz
+        // si hay una masa a mi derecha...
+        
+        //sist.Restringir_dFijaSeparacion(m[i], m2, r);
+        
+
+        //console.log(p);
+        if (p.x + 1 <= M)
+        {
+          //drawLine(m[i].r, m[i + 1].r);
+          var dist = new THREE.Vector3(0);
+          dist.addVectors(m[i].r, m[i + 1].r.clone().multiplyScalar(-1)); // r2 - r1
+          sist.conectar(m[i], m[i+1], kr, dist.length(), 5);
+        }
+
+
+        // si hay una masa abajo...
+        if (p.y + 1 <= N)
+        {
+          //drawLine(m[i].r, m[i+(M+1)].r);
+          var dist = new THREE.Vector3(0);
+          dist.addVectors(m[i].r, m[i + (M+1)].r.clone().multiplyScalar(-1)); // r2 - r1
+          sist.conectar(m[i], m[i + (M+1)], kr, dist.length(), 5);
+        }
+
+        // si hay una masa a mi derecha y abajo (diagonal derecha inferior)
+        if(p.x + 1 <= M+1 && p.y + 1 <= N) {
+          // calcula la distancia entre la masa actual 
+          // y la que esta a mi diagonal derecha inferior
+          //drawLine(m[i].r, m[i+(M)].r);
+          var dist = new THREE.Vector3(0);
+          dist.addVectors(m[i].r, m[i + (M)].r.clone().multiplyScalar(-1));
+          sist.conectar(m[i], m[i + (M)], kr, dist.length(), 5);
+        }
+
+
+        // si hay una masa a mi derecha y arriba (diagonal derecha superior)...
+        if(p.x + 1 <= M && p.y - 1 >= 0) {
+          //console.log('chupelo malparido')
+          // calcula la distancia entre la masa actual 
+          // y la que esta a mi diagonal derecha superior
+          //drawLine(m[i].r, m[i-(M)].r);
+          //dist = np.linalg.norm(m[i][j].r - m[i + 1][j - 1].r)
+          // "enl" tiene el enlace entre la masa actual y la que esta 
+          // a mi diagonal derecha superior...
+          //enl = sist.conectar(m[i][j], m[i + 1][j - 1], Kr, dist, 5.0)
+          //ax.addEnlace(enl) // dibujar el enlace entre la masa actual y la que esta diagonal derecha superior
+        }
+
+      }
+
+      console.warn("RESTRICCIONES LISTAS");
+
+    }
+  </script>
+
+</html>
